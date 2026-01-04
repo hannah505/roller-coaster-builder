@@ -150,7 +150,18 @@ export function RideCamera() {
     // Apply bank/tilt by rotating up vector around the tangent
     const tilt = getTrackTiltAtProgress(trackPoints, newProgress, isLooped);
     const targetRoll = (tilt * Math.PI) / 180;
-    previousRoll.current = previousRoll.current + (targetRoll - previousRoll.current) * CAMERA_LERP;
+    
+    // Snap roll to zero when track is level to prevent drift accumulation
+    if (Math.abs(tilt) < 0.5) {
+      previousRoll.current = 0;
+    } else {
+      previousRoll.current = previousRoll.current + (targetRoll - previousRoll.current) * CAMERA_LERP;
+    }
+    
+    // Clamp very small roll values to zero to suppress numerical drift
+    if (Math.abs(previousRoll.current) < 0.01) {
+      previousRoll.current = 0;
+    }
     
     // Create a quaternion to rotate around the tangent for banking
     const bankQuat = new THREE.Quaternion().setFromAxisAngle(tangent, -previousRoll.current);
