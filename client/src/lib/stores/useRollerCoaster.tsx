@@ -235,30 +235,8 @@ export const useRollerCoaster = create<RollerCoasterState>((set, get) => ({
           });
         }
         
-        // SEGMENT 2: nextPoint → afterNextPoint (if exists)
-        // This ensures the legacy track receives the correct incoming derivative
-        if (afterNextPoint && afterAfterPoint) {
-          const afterNextPos = afterNextPoint.position.clone();
-          const afterAfterPos = afterAfterPoint.position.clone();
-          
-          // Original Catmull tangent at afterNext: ½(afterAfter - nextPoint)
-          const originalAfterNextTangent = afterAfterPos.clone().sub(nextPos).multiplyScalar(0.5);
-          
-          const chord2 = nextPos.distanceTo(afterNextPos);
-          const D0_seg2 = originalNextTangent.clone().normalize().multiplyScalar(chord2);
-          const D1_seg2 = originalAfterNextTangent.clone().normalize().multiplyScalar(chord2);
-          
-          // Sample segment 2 (2 points between nextPoint and afterNextPoint)
-          for (let i = 1; i <= 2; i++) {
-            const t = i / 3;
-            const transPos = hermite(t, nextPos, afterNextPos, D0_seg2, D1_seg2);
-            transitionPoints.push({
-              id: `point-${++pointCounter}`,
-              position: transPos,
-              tilt: 0
-            });
-          }
-        }
+        // No segment 2 needed - the Catmull-Rom spline handles the rest naturally
+        // Adding more points before the legacy track would create a zig-zag
       }
       
       // Combine: original up to entry + loop + transitions + original remainder (unchanged)
