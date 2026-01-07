@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import * as THREE from "three";
-import { useRollerCoaster } from "@/lib/stores/useRollerCoaster";
+import { useRollerCoaster, LoopSegment } from "@/lib/stores/useRollerCoaster";
 import { Line } from "@react-three/drei";
 
 function interpolateTilt(trackPoints: { tilt: number }[], t: number, isLooped: boolean): number {
@@ -21,48 +21,61 @@ function interpolateTilt(trackPoints: { tilt: number }[], t: number, isLooped: b
   }
 }
 
-export function Track() {
-  const { trackPoints, isLooped, showWoodSupports, isNightMode } = useRollerCoaster();
+interface RailSample {
+  point: THREE.Vector3;
+  tangent: THREE.Vector3;
+  normal: THREE.Vector3;
+  up: THREE.Vector3;
+  tilt: number;
+}
+
+function sampleLoopAnalytically(
+  segment: LoopSegment,
+  theta: number
+): { point: THREE.Vector3; tangent: THREE.Vector3; up: THREE.Vector3; normal: THREE.Vector3 } {
+  const { entryPos, forward, up, right, radius } = segment;
   
-  const { curve, railData, woodSupports, trackLights } = useMemo(() => {
+  const point = new THREE.Vector3(
+    entryPos.x + forward.x * Math.sin(theta) * radius + up.x * (1 - Math.cos(theta)) * radius,
+    entryPos.y + forward.y * Math.sin(theta) * radius + up.y * (1 - Math.cos(theta)) * radius,
+    entryPos.z + forward.z * Math.sin(theta) * radius + up.z * (1 - Math.cos(theta)) * radius
+  );
+  
+  const tangent = new THREE.Vector3()
+    .addScaledVector(forward, Math.cos(theta))
+    .addScaledVector(up, Math.sin(theta))
+    .normalize();
+  
+  const inwardUp = new THREE.Vector3()
+    .addScaledVector(forward, -Math.sin(theta))
+    .addScaledVector(up, Math.cos(theta))
+    .normalize();
+  
+  return { point, tangent, up: inwardUp, normal: right.clone() };
+}
+
+export function Track() {
+  const { trackPoints, loopSegments, isLooped, showWoodSupports, isNightMode } = useRollerCoaster();
+  
+  const { railData, woodSupports, trackLights } = useMemo(() => {
     if (trackPoints.length < 2) {
-      return { curve: null, railData: [], woodSupports: [], trackLights: [] };
+      return { railData: [], woodSupports: [], trackLights: [] };
     }
     
     const points = trackPoints.map((p) => p.position.clone());
-    const curve = new THREE.CatmullRomCurve3(points, isLooped, "catmullrom", 0.5);
+    const baseSpline = new THREE.CatmullRomCurve3(points, isLooped, "catmullrom", 0.5);
     
-    const railData: { point: THREE.Vector3; tilt: number; tangent: THREE.Vector3; normal: THREE.Vector3 }[] = [];
-    const numSamples = Math.max(trackPoints.length * 20, 100);
+    const loopMap = new Map<string, LoopSegment>();
+    for (const seg of loopSegments) {
+      loopMap.set(seg.entryPointId, seg);
+    }
     
-    // Helper to get loop metadata at parameter t
-    const getLoopMetaAt = (t: number): { meta: typeof trackPoints[0]['loopMeta'], theta: number } | null => {
-      const n = trackPoints.length;
-      const scaledT = t * (isLooped ? n : n - 1);
-      const idx = Math.floor(scaledT);
-      const frac = scaledT - idx;
-      
-      const i0 = isLooped ? ((idx % n) + n) % n : Math.min(idx, n - 1);
-      const i1 = isLooped ? ((idx + 1) % n) : Math.min(idx + 1, n - 1);
-      
-      const p0 = trackPoints[i0];
-      const p1 = trackPoints[i1];
-      
-      // If either point has loop metadata, interpolate
-      if (p0.loopMeta && p1.loopMeta) {
-        // Interpolate theta between the two points
-        const theta = p0.loopMeta.theta + frac * (p1.loopMeta.theta - p0.loopMeta.theta);
-        return { meta: p0.loopMeta, theta };
-      } else if (p0.loopMeta) {
-        return { meta: p0.loopMeta, theta: p0.loopMeta.theta };
-      } else if (p1.loopMeta) {
-        return { meta: p1.loopMeta, theta: p1.loopMeta.theta };
-      }
-      return null;
-    };
+    const railData: RailSample[] = [];
+    const numSamplesPerPoint = 20;
+    const numTrackPoints = trackPoints.length;
+    const totalSplineLength = isLooped ? numTrackPoints : numTrackPoints - 1;
     
-    // Standard parallel transport initialization
-    let prevTangent = curve.getTangent(0).normalize();
+    let prevTangent = baseSpline.getTangent(0).normalize();
     let prevUp = new THREE.Vector3(0, 1, 0);
     const initDot = prevUp.dot(prevTangent);
     prevUp.sub(prevTangent.clone().multiplyScalar(initDot));
@@ -73,72 +86,41 @@ export function Track() {
     }
     prevUp.normalize();
     
-    for (let i = 0; i <= numSamples; i++) {
-      const t = i / numSamples;
-      const point = curve.getPoint(t);
-      const tangent = curve.getTangent(t).normalize();
-      const tilt = interpolateTilt(trackPoints, t, isLooped);
+    for (let pointIdx = 0; pointIdx < numTrackPoints; pointIdx++) {
+      const currentPoint = trackPoints[pointIdx];
+      const loopSeg = loopMap.get(currentPoint.id);
       
-      let up: THREE.Vector3;
-      let normal: THREE.Vector3;
-      
-      // Check if we're in a loop segment
-      const loopInfo = getLoopMetaAt(t);
-      
-      // Track if previous sample was in a loop
-      const wasInLoop = i > 0 && getLoopMetaAt((i - 1) / numSamples) !== null;
-      
-      if (loopInfo && loopInfo.meta) {
-        // Use COMPLETE reference frame from loop metadata - including tangent!
-        const meta = loopInfo.meta;
-        const theta = loopInfo.theta;
-        
-        // Reference TANGENT for ideal circular loop: d/dθ of position = cos(θ)*forward + sin(θ)*up
-        // This is the key fix - we must NOT use the spline tangent which has helical torsion
-        const refTangent = new THREE.Vector3()
-          .addScaledVector(meta.forward, Math.cos(theta))
-          .addScaledVector(meta.up, Math.sin(theta))
-          .normalize();
-        
-        // Inward radial pointing toward loop center: -sin(θ)*forward + cos(θ)*up
-        up = new THREE.Vector3()
-          .addScaledVector(meta.forward, -Math.sin(theta))
-          .addScaledVector(meta.up, Math.cos(theta))
-          .normalize();
-        
-        // Normal (sideways) is always the right vector - constant throughout the loop
-        normal = meta.right.clone();
-        
-        // OVERRIDE the spline tangent with our reference tangent
-        // This is critical - the sleeper/tie rotation uses tangent, and helical tangent causes twist
-        railData.push({ point, tilt, tangent: refTangent, normal });
-        
-        prevUp.copy(up);
-        prevTangent.copy(refTangent);
-        continue; // Skip the normal push at end of loop
-      } else {
-        // If we just exited a loop, reseed parallel transport from actual spline values
-        if (wasInLoop) {
-          // Reseed prevTangent with actual spline tangent to prevent seam
-          prevTangent.copy(tangent);
-          // Reseed prevUp: project previous up onto plane perpendicular to new tangent
-          const upDot = prevUp.dot(tangent);
-          prevUp.sub(tangent.clone().multiplyScalar(upDot));
-          if (prevUp.length() > 0.001) {
-            prevUp.normalize();
-          } else {
-            // Fallback
-            prevUp.set(0, 1, 0);
-            const d = prevUp.dot(tangent);
-            prevUp.sub(tangent.clone().multiplyScalar(d)).normalize();
-          }
+      if (loopSeg) {
+        const loopSamples = 32;
+        for (let i = 0; i <= loopSamples; i++) {
+          const theta = (i / loopSamples) * Math.PI * 2;
+          const sample = sampleLoopAnalytically(loopSeg, theta);
+          railData.push({
+            point: sample.point,
+            tangent: sample.tangent,
+            normal: sample.normal,
+            up: sample.up,
+            tilt: 0
+          });
+          prevTangent.copy(sample.tangent);
+          prevUp.copy(sample.up);
         }
-        // Standard parallel transport for non-loop sections
-        if (i === 0) {
-          up = prevUp.clone();
-        } else {
-          const dot = Math.max(-1, Math.min(1, prevTangent.dot(tangent)));
+      } else {
+        const nextIdx = isLooped ? (pointIdx + 1) % numTrackPoints : Math.min(pointIdx + 1, numTrackPoints - 1);
+        if (pointIdx >= numTrackPoints - 1 && !isLooped) continue;
+        
+        const samplesInSegment = numSamplesPerPoint;
+        for (let s = 0; s < samplesInSegment; s++) {
+          const localT = s / samplesInSegment;
+          const globalT = (pointIdx + localT) / totalSplineLength;
           
+          const point = baseSpline.getPoint(globalT);
+          const tangent = baseSpline.getTangent(globalT).normalize();
+          const tilt = interpolateTilt(trackPoints, globalT, isLooped);
+          
+          let up: THREE.Vector3;
+          
+          const dot = Math.max(-1, Math.min(1, prevTangent.dot(tangent)));
           if (dot > 0.9999) {
             up = prevUp.clone();
           } else if (dot < -0.9999) {
@@ -162,15 +144,28 @@ export function Track() {
           } else {
             up = prevUp.clone();
           }
+          
+          prevTangent.copy(tangent);
+          prevUp.copy(up);
+          
+          const normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+          
+          railData.push({ point, tangent, normal, up, tilt });
         }
-        
-        prevTangent.copy(tangent);
-        prevUp.copy(up);
-        
-        normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
       }
-      
-      railData.push({ point, tilt, tangent, normal });
+    }
+    
+    if (!isLooped && trackPoints.length >= 2) {
+      const lastPoint = baseSpline.getPoint(1);
+      const lastTangent = baseSpline.getTangent(1).normalize();
+      const lastTilt = trackPoints[trackPoints.length - 1].tilt;
+      railData.push({
+        point: lastPoint,
+        tangent: lastTangent,
+        normal: new THREE.Vector3().crossVectors(lastTangent, prevUp).normalize(),
+        up: prevUp.clone(),
+        tilt: lastTilt
+      });
     }
     
     const woodSupports: { pos: THREE.Vector3; tangent: THREE.Vector3; height: number; tilt: number }[] = [];
@@ -197,10 +192,10 @@ export function Track() {
       trackLights.push({ pos: point.clone(), normal: normal.clone() });
     }
     
-    return { curve, railData, woodSupports, trackLights };
-  }, [trackPoints, isLooped]);
+    return { railData, woodSupports, trackLights };
+  }, [trackPoints, loopSegments, isLooped]);
   
-  if (!curve || railData.length < 2) {
+  if (railData.length < 2) {
     return null;
   }
   
@@ -209,7 +204,7 @@ export function Track() {
   const railOffset = 0.3;
   
   for (let i = 0; i < railData.length; i++) {
-    const { point, tilt, tangent, normal } = railData[i];
+    const { point, tilt, normal } = railData[i];
     
     const tiltRad = (tilt * Math.PI) / 180;
     const tiltCos = Math.cos(tiltRad);
