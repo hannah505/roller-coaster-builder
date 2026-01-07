@@ -3,37 +3,40 @@ import * as THREE from "three";
 
 export type CoasterMode = "build" | "ride" | "preview";
 
-export interface LoopMetadata {
+// Loop segment descriptor - stored separately from track points
+export interface LoopSegment {
+  id: string;
+  entryPointId: string;  // ID of track point where loop starts
   entryPos: THREE.Vector3;
-  forward: THREE.Vector3;
+  forward: THREE.Vector3;  // Direction entering the loop
   up: THREE.Vector3;
   right: THREE.Vector3;
   radius: number;
-  theta: number; // 0 to 2π position in loop
 }
 
 export interface TrackPoint {
   id: string;
   position: THREE.Vector3;
   tilt: number;
-  loopMeta?: LoopMetadata; // Present if this point is part of a loop
+  hasLoop?: boolean;  // True if a loop starts at this point
 }
 
 // Serializable versions for JSON storage
-interface SerializedLoopMeta {
+interface SerializedLoopSegment {
+  id: string;
+  entryPointId: string;
   entryPos: [number, number, number];
   forward: [number, number, number];
   up: [number, number, number];
   right: [number, number, number];
   radius: number;
-  theta: number;
 }
 
 interface SerializedTrackPoint {
   id: string;
   position: [number, number, number];
   tilt: number;
-  loopMeta?: SerializedLoopMeta;
+  hasLoop?: boolean;
 }
 
 export interface SavedCoaster {
@@ -41,6 +44,7 @@ export interface SavedCoaster {
   name: string;
   timestamp: number;
   trackPoints: SerializedTrackPoint[];
+  loopSegments: SerializedLoopSegment[];
   isLooped: boolean;
   hasChainLift: boolean;
   showWoodSupports: boolean;
@@ -56,41 +60,45 @@ function deserializeVector3(arr: [number, number, number]): THREE.Vector3 {
 }
 
 function serializeTrackPoint(point: TrackPoint): SerializedTrackPoint {
-  const serialized: SerializedTrackPoint = {
+  return {
     id: point.id,
     position: serializeVector3(point.position),
     tilt: point.tilt,
+    hasLoop: point.hasLoop,
   };
-  if (point.loopMeta) {
-    serialized.loopMeta = {
-      entryPos: serializeVector3(point.loopMeta.entryPos),
-      forward: serializeVector3(point.loopMeta.forward),
-      up: serializeVector3(point.loopMeta.up),
-      right: serializeVector3(point.loopMeta.right),
-      radius: point.loopMeta.radius,
-      theta: point.loopMeta.theta,
-    };
-  }
-  return serialized;
 }
 
 function deserializeTrackPoint(serialized: SerializedTrackPoint): TrackPoint {
-  const point: TrackPoint = {
+  return {
     id: serialized.id,
     position: deserializeVector3(serialized.position),
     tilt: serialized.tilt,
+    hasLoop: serialized.hasLoop,
   };
-  if (serialized.loopMeta) {
-    point.loopMeta = {
-      entryPos: deserializeVector3(serialized.loopMeta.entryPos),
-      forward: deserializeVector3(serialized.loopMeta.forward),
-      up: deserializeVector3(serialized.loopMeta.up),
-      right: deserializeVector3(serialized.loopMeta.right),
-      radius: serialized.loopMeta.radius,
-      theta: serialized.loopMeta.theta,
-    };
-  }
-  return point;
+}
+
+function serializeLoopSegment(segment: LoopSegment): SerializedLoopSegment {
+  return {
+    id: segment.id,
+    entryPointId: segment.entryPointId,
+    entryPos: serializeVector3(segment.entryPos),
+    forward: serializeVector3(segment.forward),
+    up: serializeVector3(segment.up),
+    right: serializeVector3(segment.right),
+    radius: segment.radius,
+  };
+}
+
+function deserializeLoopSegment(serialized: SerializedLoopSegment): LoopSegment {
+  return {
+    id: serialized.id,
+    entryPointId: serialized.entryPointId,
+    entryPos: deserializeVector3(serialized.entryPos),
+    forward: deserializeVector3(serialized.forward),
+    up: deserializeVector3(serialized.up),
+    right: deserializeVector3(serialized.right),
+    radius: serialized.radius,
+  };
 }
 
 const STORAGE_KEY = "roller_coaster_saves";
@@ -111,6 +119,7 @@ function persistSavedCoasters(coasters: SavedCoaster[]) {
 interface RollerCoasterState {
   mode: CoasterMode;
   trackPoints: TrackPoint[];
+  loopSegments: LoopSegment[];
   selectedPointId: string | null;
   rideProgress: number;
   isRiding: boolean;
@@ -160,6 +169,7 @@ let pointCounter = 0;
 export const useRollerCoaster = create<RollerCoasterState>((set, get) => ({
   mode: "build",
   trackPoints: [],
+  loopSegments: [],
   selectedPointId: null,
   rideProgress: 0,
   isRiding: false,
@@ -225,10 +235,13 @@ export const useRollerCoaster = create<RollerCoasterState>((set, get) => ({
       const pointIndex = state.trackPoints.findIndex((p) => p.id === id);
       if (pointIndex === -1) return state;
       
+      // Check if this point already has a loop
       const entryPoint = state.trackPoints[pointIndex];
+      if (entryPoint.hasLoop) return state;
+      
       const entryPos = entryPoint.position.clone();
       
-      // Calculate forward direction from neighboring points (simple and reliable)
+      // Calculate forward direction from neighboring points
       let forward = new THREE.Vector3(1, 0, 0);
       if (pointIndex > 0) {
         const prevPoint = state.trackPoints[pointIndex - 1];
@@ -241,97 +254,36 @@ export const useRollerCoaster = create<RollerCoasterState>((set, get) => ({
       }
       
       const loopRadius = 5;
-      // Use fewer loop points - CatmullRom will smooth them
-      const totalLoopPoints = 16;
-      const loopPoints: TrackPoint[] = [];
-      
-      // World up for vertical loop
       const up = new THREE.Vector3(0, 1, 0);
       const right = new THREE.Vector3().crossVectors(forward, up).normalize();
       
-      // Small helical offset to prevent entry/exit overlap
-      const helixSeparation = 1.5;
+      // Create loop segment descriptor (NO points inserted into track)
+      const loopSegment: LoopSegment = {
+        id: `loop-${Date.now()}`,
+        entryPointId: id,
+        entryPos: entryPos.clone(),
+        forward: forward.clone(),
+        up: up.clone(),
+        right: right.clone(),
+        radius: loopRadius,
+      };
       
-      // Build the loop with slight helical offset
-      for (let i = 0; i <= totalLoopPoints; i++) {
-        const loopT = i / totalLoopPoints;
-        const theta = loopT * Math.PI * 2;
-        
-        const forwardOffset = Math.sin(theta) * loopRadius;
-        const verticalOffset = (1 - Math.cos(theta)) * loopRadius;
-        
-        // Smoothstep lateral offset
-        const smoothT = loopT * loopT * (3 - 2 * loopT);
-        const lateralOffset = smoothT * helixSeparation;
-        
-        loopPoints.push({
-          id: `point-${++pointCounter}`,
-          position: new THREE.Vector3(
-            entryPos.x + forward.x * forwardOffset + right.x * lateralOffset,
-            entryPos.y + verticalOffset,
-            entryPos.z + forward.z * forwardOffset + right.z * lateralOffset
-          ),
-          tilt: 0,
-          loopMeta: {
-            entryPos: entryPos.clone(),
-            forward: forward.clone(),
-            up: up.clone(),
-            right: right.clone(),
-            radius: loopRadius,
-            theta: theta
-          }
-        });
-      }
+      // Mark the track point as having a loop
+      const newTrackPoints = state.trackPoints.map((p) =>
+        p.id === id ? { ...p, hasLoop: true } : p
+      );
       
-      const loopExitPos = loopPoints[loopPoints.length - 1].position.clone();
-      
-      // Calculate exit direction toward next point if available
-      const nextOriginalPoint = state.trackPoints[pointIndex + 1];
-      let exitDir = forward.clone();
-      if (nextOriginalPoint) {
-        const toNext = nextOriginalPoint.position.clone().sub(loopExitPos);
-        toNext.y = 0;
-        if (toNext.length() > 0.1) {
-          exitDir = toNext.normalize();
-        }
-      }
-      
-      // Departure points aligned with exit direction, gradually reducing lateral offset
-      const departureDist = 4;
-      const departurePoints: TrackPoint[] = [];
-      
-      for (let i = 1; i <= 3; i++) {
-        const t = i / 3;
-        const remainingOffset = helixSeparation * (1 - t);
-        
-        departurePoints.push({
-          id: `point-${++pointCounter}`,
-          position: new THREE.Vector3(
-            loopExitPos.x + exitDir.x * departureDist * i + right.x * remainingOffset,
-            loopExitPos.y,
-            loopExitPos.z + exitDir.z * departureDist * i + right.z * remainingOffset
-          ),
-          tilt: 0
-        });
-      }
-      
-      // Keep the entry point as-is (provides natural spline approach)
-      // Insert loop after entry point
-      const newTrackPoints = [
-        ...state.trackPoints.slice(0, pointIndex + 1),  // Include entry point
-        ...loopPoints.slice(1),  // Skip first loop point (same as entry)
-        ...departurePoints,
-        ...state.trackPoints.slice(pointIndex + 1)
-      ];
-      
-      return { trackPoints: newTrackPoints };
+      return {
+        trackPoints: newTrackPoints,
+        loopSegments: [...state.loopSegments, loopSegment],
+      };
     });
   },
   
   selectPoint: (id) => set({ selectedPointId: id }),
   
   clearTrack: () => {
-    set({ trackPoints: [], selectedPointId: null, rideProgress: 0, isRiding: false });
+    set({ trackPoints: [], loopSegments: [], selectedPointId: null, rideProgress: 0, isRiding: false });
   },
   
   setRideProgress: (progress) => set({ rideProgress: progress }),
@@ -360,6 +312,7 @@ export const useRollerCoaster = create<RollerCoasterState>((set, get) => ({
       name,
       timestamp: Date.now(),
       trackPoints: state.trackPoints.map(serializeTrackPoint),
+      loopSegments: state.loopSegments.map(serializeLoopSegment),
       isLooped: state.isLooped,
       hasChainLift: state.hasChainLift,
       showWoodSupports: state.showWoodSupports,
@@ -379,6 +332,7 @@ export const useRollerCoaster = create<RollerCoasterState>((set, get) => ({
       if (!coaster || !Array.isArray(coaster.trackPoints)) return;
       
       const trackPoints = coaster.trackPoints.map(deserializeTrackPoint);
+      const loopSegments = (coaster.loopSegments || []).map(deserializeLoopSegment);
       
       // Update pointCounter to avoid ID collisions
       const maxId = trackPoints.reduce((max, p) => {
@@ -389,6 +343,7 @@ export const useRollerCoaster = create<RollerCoasterState>((set, get) => ({
       
       set({
         trackPoints,
+        loopSegments,
         isLooped: Boolean(coaster.isLooped),
         hasChainLift: coaster.hasChainLift !== false,
         showWoodSupports: Boolean(coaster.showWoodSupports),
