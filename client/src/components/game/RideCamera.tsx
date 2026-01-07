@@ -75,16 +75,9 @@ export function RideCamera() {
       speed = chainSpeed;
       maxHeightReached.current = Math.max(maxHeightReached.current, currentHeight);
     } else {
-      maxHeightReached.current = Math.max(maxHeightReached.current, currentHeight);
-      
-      const gravity = 9.8;
-      const heightDrop = maxHeightReached.current - currentHeight;
-      
-      const energySpeed = Math.sqrt(2 * gravity * Math.max(0, heightDrop));
-      
-      // Higher minimum speed for smooth loops
-      const minSpeed = 8.0;
-      speed = Math.max(minSpeed, energySpeed) * rideSpeed;
+      // Use constant speed for smooth loop experience
+      const constantSpeed = 12.0;
+      speed = constantSpeed * rideSpeed;
     }
     
     const progressDelta = (speed * delta) / curveLength;
