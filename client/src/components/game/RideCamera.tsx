@@ -24,9 +24,8 @@ interface BarrelRollFrame {
   pitch: number;
 }
 
-// Eased barrel roll with zero angular velocity at endpoints
-// Uses (1-cos(θ)) for vertical to keep track ABOVE entry point
-function sampleBarrelRollAnalytically(
+// Vertical loop: track goes in a vertical circle, rider goes upside down at top
+function sampleVerticalLoopAnalytically(
   frame: BarrelRollFrame,
   t: number
 ): { point: THREE.Vector3; tangent: THREE.Vector3; up: THREE.Vector3 } {
@@ -34,27 +33,24 @@ function sampleBarrelRollAnalytically(
   
   const twoPi = Math.PI * 2;
   
-  // Eased theta: zero angular velocity at t=0 and t=1
   const theta = twoPi * (t - Math.sin(twoPi * t) / twoPi);
   const dThetaDt = twoPi * (1 - Math.cos(twoPi * t));
   
-  // Position using (1-cos(θ)) keeps track above entry height
+  // Vertical loop in forward-up plane
   const point = new THREE.Vector3()
     .copy(entryPos)
-    .addScaledVector(forward, pitch * t)
-    .addScaledVector(U0, radius * (1 - Math.cos(theta)))
-    .addScaledVector(R0, radius * Math.sin(theta));
+    .addScaledVector(forward, pitch * t + radius * Math.sin(theta))
+    .addScaledVector(U0, radius * (1 - Math.cos(theta)));
   
-  // At t=0 or t=1, dThetaDt=0, so tangent = forward*pitch (normalized)
   const tangent = new THREE.Vector3()
-    .copy(forward).multiplyScalar(pitch)
+    .copy(forward).multiplyScalar(pitch + radius * Math.cos(theta) * dThetaDt)
     .addScaledVector(U0, radius * Math.sin(theta) * dThetaDt)
-    .addScaledVector(R0, radius * Math.cos(theta) * dThetaDt)
     .normalize();
   
+  // Up rotates around right axis - upside down at θ=π
   const rotatedUp = new THREE.Vector3()
     .addScaledVector(U0, Math.cos(theta))
-    .addScaledVector(R0, -Math.sin(theta))
+    .addScaledVector(forward, -Math.sin(theta))
     .normalize();
   
   return { point, tangent, up: rotatedUp };
@@ -385,7 +381,7 @@ function sampleHybridTrack(
   const localT = (progress - section.startProgress) / (section.endProgress - section.startProgress);
   
   if (section.type === "roll" && section.rollFrame) {
-    const sample = sampleBarrelRollAnalytically(section.rollFrame, localT);
+    const sample = sampleVerticalLoopAnalytically(section.rollFrame, localT);
     return { ...sample, inRoll: true };
   } else if (section.splineStartT !== undefined && section.splineEndT !== undefined) {
     const splineT = section.splineStartT + localT * (section.splineEndT - section.splineStartT);

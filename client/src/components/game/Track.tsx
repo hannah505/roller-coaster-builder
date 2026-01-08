@@ -38,11 +38,10 @@ interface BarrelRollFrame {
   pitch: number;
 }
 
-// Eased barrel roll: uses an easing function so angular velocity is zero at endpoints
-// This ensures tangent is purely forward at entry and exit (C1 continuous with spline)
-// θ(t) = 2π * (t - sin(2πt)/(2π)), which has dθ/dt = 0 at t=0 and t=1
-// Position uses (1-cos(θ)) for vertical to keep track ABOVE entry point
-function sampleBarrelRollAnalytically(
+// Vertical loop: track goes in a vertical circle in the forward-up plane
+// Rider goes upside down at the top (θ=π), loop is perpendicular to track direction
+// θ(t) = 2π * (t - sin(2πt)/(2π)) ensures zero angular velocity at endpoints for C1 continuity
+function sampleVerticalLoopAnalytically(
   frame: BarrelRollFrame,
   t: number  // 0 to 1
 ): { point: THREE.Vector3; tangent: THREE.Vector3; up: THREE.Vector3; normal: THREE.Vector3 } {
@@ -54,33 +53,33 @@ function sampleBarrelRollAnalytically(
   const theta = twoPi * (t - Math.sin(twoPi * t) / twoPi);
   const dThetaDt = twoPi * (1 - Math.cos(twoPi * t));
   
-  // Position on spiral - using (1-cos(θ)) keeps track above entry height
-  // At θ=0: (1-1)=0, at θ=π: (1-(-1))=2 (peak), at θ=2π: (1-1)=0
+  // Vertical loop in forward-up plane:
+  // - forward component: radius*sin(θ) creates the forward/backward motion
+  // - up component: radius*(1-cos(θ)) creates the vertical motion (always >= 0)
+  // - pitch*t advances the exit point ahead of entry
   const point = new THREE.Vector3()
     .copy(entryPos)
-    .addScaledVector(forward, pitch * t)
-    .addScaledVector(U0, radius * (1 - Math.cos(theta)))
-    .addScaledVector(R0, radius * Math.sin(theta));
+    .addScaledVector(forward, pitch * t + radius * Math.sin(theta))
+    .addScaledVector(U0, radius * (1 - Math.cos(theta)));
   
-  // Tangent: dP/dt = forward*pitch + (U0*(radius*sin(θ)) + R0*(radius*cos(θ))) * dθ/dt
+  // Tangent: derivative of position
+  // dP/dt = forward*(pitch + radius*cos(θ)*dθ/dt) + U0*(radius*sin(θ)*dθ/dt)
   const tangent = new THREE.Vector3()
-    .copy(forward).multiplyScalar(pitch)
+    .copy(forward).multiplyScalar(pitch + radius * Math.cos(theta) * dThetaDt)
     .addScaledVector(U0, radius * Math.sin(theta) * dThetaDt)
-    .addScaledVector(R0, radius * Math.cos(theta) * dThetaDt)
     .normalize();
   
-  // Up vector rotates with theta (same eased theta)
+  // Up vector rotates around the RIGHT axis (perpendicular to the loop plane)
+  // At θ=0: up = U0 (normal)
+  // At θ=π: up = -U0 (upside down at top of loop!)
+  // At θ=2π: up = U0 (back to normal)
   const rotatedUp = new THREE.Vector3()
     .addScaledVector(U0, Math.cos(theta))
-    .addScaledVector(R0, -Math.sin(theta))
+    .addScaledVector(forward, -Math.sin(theta))
     .normalize();
   
-  const rotatedRight = new THREE.Vector3()
-    .addScaledVector(R0, Math.cos(theta))
-    .addScaledVector(U0, Math.sin(theta))
-    .normalize();
-  
-  const normal = rotatedRight.clone();
+  // Right vector stays constant (perpendicular to the loop plane)
+  const normal = R0.clone();
   
   return { point, tangent, up: rotatedUp, normal };
 }
@@ -159,7 +158,7 @@ export function Track() {
         const rollSamples = 64;  // More samples for smooth eased roll
         for (let i = 0; i <= rollSamples; i++) {
           const t = i / rollSamples;
-          const sample = sampleBarrelRollAnalytically(rollFrame, t);
+          const sample = sampleVerticalLoopAnalytically(rollFrame, t);
           railData.push({
             point: sample.point,
             tangent: sample.tangent,
